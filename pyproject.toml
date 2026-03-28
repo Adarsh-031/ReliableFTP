@@ -1,0 +1,11 @@
+[project]
+name = "reliableftp"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "cffi>=2.0.0",
+    "cryptography>=46.0.6",
+    "pycparser>=3.0",
+]
