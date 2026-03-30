@@ -12,10 +12,11 @@ This document provides an in-depth technical explanation of every component, fun
 4. [utils.py - Detailed Breakdown](#4-utilspy---detailed-breakdown)
 5. [server.py - Detailed Breakdown](#5-serverpy---detailed-breakdown)
 6. [client.py - Detailed Breakdown](#6-clientpy---detailed-breakdown)
-7. [Protocol State Machine](#7-protocol-state-machine)
-8. [Concurrency Model](#8-concurrency-model)
-9. [Error Handling Deep Dive](#9-error-handling-deep-dive)
-10. [Network Byte Flow](#10-network-byte-flow)
+7. [app.py - Protocol Adapters & GUI](#7-apppy---protocol-adapters--gui)
+8. [Protocol State Machine](#8-protocol-state-machine)
+9. [Concurrency Model](#9-concurrency-model)
+10. [Error Handling Deep Dive](#10-error-handling-deep-dive)
+11. [Network Byte Flow](#11-network-byte-flow)
 
 ---
 
@@ -25,32 +26,50 @@ This document provides an in-depth technical explanation of every component, fun
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                            APPLICATION LAYER                             │
-│  ┌─────────────────────────────────────────────────────────────────┐    │
-│  │                    Reliable FTP Protocol                         │    │
-│  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐  │    │
-│  │  │  Commands   │  │  Chunking   │  │  Sequence & ACK Logic   │  │    │
-│  │  │  REQUEST    │  │  4KB blocks │  │  Stop-and-Wait ARQ      │  │    │
-│  │  │  UPLOAD     │  │             │  │                         │  │    │
-│  │  └─────────────┘  └─────────────┘  └─────────────────────────┘  │    │
-│  └─────────────────────────────────────────────────────────────────┘    │
+│                              GUI LAYER                                   │
+│  ┌──────────────────────────────────────────────────────────────────┐   │
+│  │  app.py  ─  Tkinter (HomeScreen / ServerScreen / ClientScreen)   │   │
+│  │  TransferRow | LogBox | ProgressBar | Pause/Cancel Events        │   │
+│  └──────────────────────────────────────────────────────────────────┘   │
+│                              ▲         ▲                                 │
+│                   log_cb / transfer_cb │ prog_cb(frac, speed)           │
+│                              │         │                                 │
+│  ┌──────────────────────────────────────────────────────────────────┐   │
+│  │   PROTOCOL ADAPTERS  (also in app.py)                            │   │
+│  │   FileTransferServer          FileTransferClient                 │   │
+│  │   ─ _accept_loop()            ─ connect() / disconnect()         │   │
+│  │   ─ _handle_client()          ─ list_files()                     │   │
+│  │   ─ _handle_upload()          ─ download()                       │   │
+│  │                               ─ upload()                         │   │
+│  └──────────────────────────────────────────────────────────────────┘   │
 ├─────────────────────────────────────────────────────────────────────────┤
-│                            SECURITY LAYER                                │
-│  ┌─────────────────────────────────────────────────────────────────┐    │
-│  │                    Fernet Encryption                             │    │
-│  │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐  │    │
-│  │  │  AES-128-CBC    │  │  HMAC-SHA256    │  │  MD5 Checksum   │  │    │
-│  │  │  Confidentiality│  │  Authentication │  │  Integrity      │  │    │
-│  │  └─────────────────┘  └─────────────────┘  └─────────────────┘  │    │
-│  └─────────────────────────────────────────────────────────────────┘    │
+│                          APPLICATION LAYER                               │
+│  ┌──────────────────────────────────────────────────────────────────┐   │
+│  │                    Reliable FTP Protocol                          │   │
+│  │  ┌──────────────┐  ┌──────────────┐  ┌───────────────────────┐  │   │
+│  │  │  Commands    │  │  Chunking    │  │  Sliding Window ARQ   │  │   │
+│  │  │  REQUEST     │  │  4KB blocks  │  │  Window size = 5      │  │   │
+│  │  │  UPLOAD      │  │              │  │  Go-Back-N retransmit │  │   │
+│  │  │  LIST        │  │              │  │                       │  │   │
+│  │  └──────────────┘  └──────────────┘  └───────────────────────┘  │   │
+│  └──────────────────────────────────────────────────────────────────┘   │
 ├─────────────────────────────────────────────────────────────────────────┤
-│                            TRANSPORT LAYER                               │
-│  ┌─────────────────────────────────────────────────────────────────┐    │
-│  │                         UDP Sockets                              │    │
-│  │  ┌─────────────────────────────────────────────────────────┐    │    │
-│  │  │  socket.SOCK_DGRAM | Connectionless | Unreliable       │    │    │
-│  │  └─────────────────────────────────────────────────────────┘    │    │
-│  └─────────────────────────────────────────────────────────────────┘    │
+│                           SECURITY LAYER                                 │
+│  ┌──────────────────────────────────────────────────────────────────┐   │
+│  │                    Fernet Encryption                              │   │
+│  │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐  │   │
+│  │  │  AES-128-CBC    │  │  HMAC-SHA256    │  │  MD5 Checksum   │  │   │
+│  │  │  Confidentiality│  │  Authentication │  │  Integrity      │  │   │
+│  │  └─────────────────┘  └─────────────────┘  └─────────────────┘  │   │
+│  └──────────────────────────────────────────────────────────────────┘   │
+├─────────────────────────────────────────────────────────────────────────┤
+│                          TRANSPORT LAYER                                 │
+│  ┌──────────────────────────────────────────────────────────────────┐   │
+│  │                        UDP Sockets                                │   │
+│  │  ┌────────────────────────────────────────────────────────┐      │   │
+│  │  │  socket.SOCK_DGRAM | Connectionless | Unreliable       │      │   │
+│  │  └────────────────────────────────────────────────────────┘      │   │
+│  └──────────────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -58,9 +77,29 @@ This document provides an in-depth technical explanation of every component, fun
 
 | Layer | Purpose | Without It |
 |-------|---------|------------|
-| Application | File transfer logic | No way to request/send files |
+| GUI | User interaction, progress feedback, pause/cancel | No visual interface |
+| Protocol Adapters | Class-based bridge between GUI and network | GUI cannot talk to network |
+| Application | File transfer logic, commands, window management | No way to request/send files reliably |
 | Security | Encryption + Integrity | Data readable by attackers, tampering possible |
 | Transport | UDP communication | No network communication |
+
+### 1.3 Dual-Mode Architecture
+
+The project supports **two usage modes** from the same codebase:
+
+```
+Mode 1 — Graphical (app.py):
+  python app.py
+    └─> Launches Tkinter GUI
+    └─> Uses FileTransferServer / FileTransferClient class adapters
+    └─> Progress via callbacks, pause/cancel via threading.Event
+
+Mode 2 — Command-Line (server.py / client.py):
+  python server.py        python client.py download myfile.zip
+    └─> Standalone CLI      └─> Standalone CLI
+    └─> Global state        └─> KeyboardInterrupt for pause
+    └─> print() output      └─> sys.stdout progress bar
+```
 
 ---
 
@@ -86,6 +125,7 @@ sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 | **Send** | `sock.sendto(data, addr)` | Send data to specific address |
 | **Receive** | `sock.recvfrom(buffer_size)` | Receive data and sender address |
 | **Timeout** | `sock.settimeout(seconds)` | Set blocking timeout |
+| **Select** | `select.select([sock], [], [], t)` | Non-blocking readiness check |
 | **Close** | `sock.close()` | Release socket resources |
 
 ### 2.3 UDP vs TCP Comparison
@@ -106,7 +146,7 @@ TCP (Alternative):
 └─────────┘         └─────────┘
 ```
 
-We chose UDP and built reliability ourselves to demonstrate protocol design.
+We chose UDP and built reliability ourselves (via Sliding Window ARQ) to demonstrate protocol design without TCP overhead.
 
 ---
 
@@ -164,7 +204,7 @@ def encrypt_data(data):
     return cipher.encrypt(data)
 ```
 
-**Input:** `bytes` (raw binary data)
+**Input:** `bytes` (raw binary data)  
 **Output:** `bytes` (encrypted, base64-encoded)
 
 **What Fernet.encrypt() does internally:**
@@ -179,7 +219,7 @@ Input: b"Hello World"
            │
            ▼
 ┌──────────────────────────────────┐
-│ 2. Pad data to 16-byte boundary │
+│ 2. Pad data to 16-byte boundary  │
 │    (PKCS7 padding)               │
 └──────────────────────────────────┘
            │
@@ -280,7 +320,7 @@ Output: b"Hello World" (original)
 
 ## 4. utils.py - Detailed Breakdown
 
-### 4.1 Complete Code with Annotations
+### 4.1 Complete Code
 
 ```python
 """
@@ -288,6 +328,17 @@ Utility functions for Reliable FTP
 """
 
 import hashlib
+
+# Chunk size for file transfer (4KB)
+CHUNK_SIZE = 4096
+
+def checksum(data):
+    """Calculate MD5 checksum for data integrity verification"""
+    return hashlib.md5(data).hexdigest()
+
+def verify_checksum(data, expected_checksum):
+    """Verify data integrity by comparing checksums"""
+    return checksum(data) == expected_checksum
 ```
 
 **Import Explanation:**
@@ -297,7 +348,6 @@ import hashlib
 ### 4.2 Chunk Size Constant
 
 ```python
-# Chunk size for file transfer (4KB)
 CHUNK_SIZE = 4096
 ```
 
@@ -306,7 +356,7 @@ CHUNK_SIZE = 4096
 | Consideration | Explanation |
 |---------------|-------------|
 | **UDP MTU** | Max UDP payload ~65,507 bytes, but network MTU is typically 1500 bytes. 4KB leaves room for headers after fragmentation. |
-| **Memory** | Small enough to buffer many chunks in RAM |
+| **Memory** | Small enough to buffer an entire window (5 × 4KB = 20KB) easily in RAM |
 | **Efficiency** | Large enough to reduce per-chunk overhead |
 | **Common size** | Matches filesystem block size on most systems |
 
@@ -319,11 +369,10 @@ Raw chunk:                    4096 bytes
 After Fernet encryption:      ~5600 bytes (base64 + overhead)
 ```
 
-### 4.3 Checksum Function
+### 4.3 checksum() Function
 
 ```python
 def checksum(data):
-    """Calculate MD5 checksum for data integrity verification"""
     return hashlib.md5(data).hexdigest()
 ```
 
@@ -335,10 +384,10 @@ Input: b"Hello World" (any length)
            ▼
 ┌──────────────────────────────────┐
 │ MD5 Algorithm (128-bit hash)     │
-│ - Processes data in 512-bit     │
+│ - Processes data in 512-bit      │
 │   blocks                         │
-│ - 4 rounds of 16 operations     │
-│ - Produces fixed 128-bit output │
+│ - 4 rounds of 16 operations      │
+│ - Produces fixed 128-bit output  │
 └──────────────────────────────────┘
            │
            ▼
@@ -348,34 +397,34 @@ Output: "b10a8db164e0754105b7a99be72e3fe5"
 
 **Why MD5 for integrity (not security)?**
 - Fast to compute
-- 128-bit output is sufficient for error detection
-- We're not using it for security (Fernet handles that)
+- 128-bit output is sufficient for transmission error detection
+- Security is handled separately by Fernet
 - Probability of accidental collision: 1 in 2^128
 
-### 4.4 Verify Checksum Function
+### 4.4 verify_checksum() Function
 
 ```python
 def verify_checksum(data, expected_checksum):
-    """Verify data integrity by comparing checksums"""
     return checksum(data) == expected_checksum
 ```
 
-**String comparison in Python:**
-- Compares character by character
-- Returns `True` if all characters match
-- Returns `False` on first mismatch
+A convenience wrapper used internally to compare a freshly computed checksum against the one embedded in a received packet. Returns `True` if the chunk is intact, `False` if corrupted.
+
+> **Note:** In practice, the inline expression `checksum(chunk) == received_checksum` is used directly inside `server.py`, `client.py`, and `app.py`. `verify_checksum()` provides a cleaner API for future callers.
 
 ---
 
 ## 5. server.py - Detailed Breakdown
 
+> `server.py` is the **standalone CLI server**. The GUI version wraps the same logic inside the `FileTransferServer` class in `app.py`. Both share identical protocol logic.
+
 ### 5.1 Imports and Constants
 
 ```python
-import socket          # Low-level networking
-import os              # File system operations
-import threading       # Multi-client support
-import select          # Non-blocking I/O multiplexing
+import socket
+import os
+import threading
+import select
 from utils import CHUNK_SIZE, checksum
 from encryption import encrypt_data, decrypt_data
 
@@ -383,7 +432,7 @@ SERVER_IP = "0.0.0.0"  # Listen on all interfaces
 MAIN_PORT = 9000       # Main listening port
 ```
 
-**Why "0.0.0.0"?**
+**Why `"0.0.0.0"`?**
 ```
 0.0.0.0 = Listen on ALL network interfaces:
   - localhost (127.0.0.1)
@@ -396,9 +445,9 @@ vs 127.0.0.1 = Only localhost connections
 ### 5.2 Global State Variables
 
 ```python
-active_clients = {}      # Dictionary: session_id -> True
-clients_lock = threading.Lock()  # Mutex for thread safety
-running = True           # Server running flag
+active_clients = {}
+clients_lock = threading.Lock()
+running = True
 ```
 
 **Why we need a lock:**
@@ -415,14 +464,15 @@ Thread 1: acquires lock, reads, writes, releases lock
 Thread 2: waits for lock, then reads correct value
 ```
 
+> **GUI difference:** In `app.py`, these are instance attributes on `FileTransferServer` (`self.active_clients`, `self.clients_lock`, `self._running`), not globals.
+
 ### 5.3 get_free_port() Function
 
 ```python
 def get_free_port():
-    """Find an available port for client session"""
     temp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    temp_sock.bind(('', 0))      # '' = 0.0.0.0, 0 = let OS choose
-    port = temp_sock.getsockname()[1]  # Get assigned port
+    temp_sock.bind(('', 0))
+    port = temp_sock.getsockname()[1]
     temp_sock.close()
     return port
 ```
@@ -435,629 +485,538 @@ def get_free_port():
 4. getsockname() returns ('0.0.0.0', 54321)
 5. We extract port number: 54321
 6. Close socket, freeing port for later use
-
-NOTE: Tiny race condition exists between close() and
-      re-bind(), but extremely unlikely in practice.
 ```
 
-### 5.4 handle_client() Function - Download Handler
+### 5.4 handle_client() — Download Handler with Sliding Window
+
+This is the most significant change from the original design. The server now uses a **Go-Back-N Sliding Window** instead of Stop-and-Wait for downloads.
 
 ```python
-def handle_client(client_addr, filename):
-    """Handle file transfer for a single client on dedicated socket"""
-    client_ip, client_port = client_addr  # Tuple unpacking
-    session_id = f"{client_ip}:{client_port}"
+def handle_client(client_addr, filename, resume_seq=0):
 ```
 
-**Tuple unpacking:**
-```python
-client_addr = ('127.0.0.1', 54321)
-client_ip, client_port = client_addr
-# client_ip = '127.0.0.1'
-# client_port = 54321
-```
+**New `resume_seq` parameter:** Tells the server which chunk to start from. On a fresh download this is `0`; on a resume it is `existing_file_bytes // CHUNK_SIZE`.
 
-#### 5.4.1 Creating Dedicated Session Socket
+#### 5.4.1 Resume Logic
 
 ```python
-    client_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    session_port = get_free_port()
-    client_sock.bind((SERVER_IP, session_port))
-    client_sock.settimeout(30)
+seq = resume_seq
+if resume_seq > 0:
+    f.seek(resume_seq * CHUNK_SIZE)
+    print(f"[RESUME] Skipping to chunk {resume_seq} for {session_id}")
 ```
 
-**Why dedicated socket?**
-```
-Main socket (port 9000):
-  - Receives all initial requests
-  - Cannot distinguish ACKs from different clients
+`f.seek()` jumps the file pointer directly to the byte offset where the partial download ended. No bytes are re-read or re-sent.
 
-Session socket (port 54321):
-  - Only this client communicates here
-  - ACKs unambiguously belong to this transfer
-```
-
-#### 5.4.2 File Validation
+#### 5.4.2 Sliding Window (Go-Back-N ARQ)
 
 ```python
-    filepath = "server_files/" + filename
-    
-    if not os.path.exists(filepath):
-        error_msg = encrypt_data(b"ERROR File not found")
-        client_sock.sendto(error_msg, client_addr)
+WINDOW_SIZE = 5
+unacked_packets = {}   # {seq: encrypted_packet}
+timeout_count = 0
+max_retries = 5
+
+while running:
+    # Fill the window up to WINDOW_SIZE outstanding packets
+    while len(unacked_packets) < WINDOW_SIZE:
+        chunk = f.read(CHUNK_SIZE)
+        if not chunk:
+            break  # EOF
+        chunk_checksum = checksum(chunk)
+        packet = f"{seq}|{chunk_checksum}|".encode() + chunk
+        encrypted_packet = encrypt_data(packet)
+        unacked_packets[seq] = encrypted_packet
+        client_sock.sendto(encrypted_packet, client_addr)
+        seq += 1
+
+    if not unacked_packets:
+        break  # All acknowledged, transfer complete
+
+    ready = select.select([client_sock], [], [], 2)
+    ...
+```
+
+**Window visualized:**
+
+```
+─── Sliding Window (size = 5) ───────────────────────────────────
+
+Sequence:  0    1    2    3    4    5    6    7    8
+           ■    ■    ■    ■    ■    □    □    □    □
+           ▲                   ▲
+     window base          window edge
+     (oldest unacked)     (newest sent)
+
+When ACK 0 arrives:
+           0    1    2    3    4    5    6    7    8
+                ■    ■    ■    ■    ■    □    □    □
+                ▲                   ▲
+          window advances,    new chunk 5 can now be sent
+```
+
+**unacked_packets dictionary:** Maps sequence numbers to their encrypted payloads. Packets stay here until their ACK arrives. On timeout, everything in the dictionary is retransmitted (Go-Back-N).
+
+#### 5.4.3 ACK Processing with select()
+
+```python
+ready = select.select([client_sock], [], [], 2)
+
+if ready[0]:
+    ack_data, _ = client_sock.recvfrom(1024)
+    ack = decrypt_data(ack_data).decode()
+
+    if ack.startswith("ERROR"):
+        # Client paused or cancelled
+        print(f"[PAUSED] Client {session_id} halted transfer.")
         return
+
+    if ack.startswith("ACK"):
+        ack_seq = int(ack.split()[1])
+        if ack_seq in unacked_packets:
+            del unacked_packets[ack_seq]
+            timeout_count = 0
+
+    elif ack.startswith("NACK"):
+        nack_seq = int(ack.split()[1])
+        if nack_seq in unacked_packets:
+            client_sock.sendto(unacked_packets[nack_seq], client_addr)
+else:
+    # Timeout: retransmit entire window
+    timeout_count += 1
+    for p_seq, p_data in unacked_packets.items():
+        client_sock.sendto(p_data, client_addr)
+    if timeout_count >= max_retries:
+        ...  # Abort
 ```
 
-**Security consideration:**
-```python
-# VULNERABLE to path traversal:
-filename = "../etc/passwd"
-filepath = "server_files/" + "../etc/passwd"
-# filepath = "server_files/../etc/passwd" = "/etc/passwd" !!!
-
-# FIX (not implemented but should be):
-filename = os.path.basename(filename)  # Removes path components
-```
-
-#### 5.4.3 Handshake: Sending Metadata
-
-```python
-    filesize = os.path.getsize(filepath)
-    response = f"OK {filesize} {session_port}"
-    client_sock.sendto(encrypt_data(response.encode()), client_addr)
-```
-
-**Response format:** `"OK <filesize> <session_port>"`
-**Example:** `"OK 1048576 54321"` (1MB file, session port 54321)
-
-#### 5.4.4 Waiting for Client Ready
-
-```python
-    try:
-        ack_data, addr = client_sock.recvfrom(1024)
-        ack = decrypt_data(ack_data).decode()
-        if ack != "READY":
-            return
-    except socket.timeout:
-        return
-```
-
-**Why this handshake?**
-```
-Server                              Client
-   │                                   │
-   │←── (sending to client's port) ────│
-   │──── OK 1048576 54321 ────────────>│
-   │                                   │
-   │     Client now knows to send      │
-   │     future messages to port 54321 │
-   │                                   │
-   │<──── READY (to port 54321) ───────│
-   │                                   │
-   │     Server confirms client        │
-   │     received session port         │
-```
-
-#### 5.4.5 Chunk Reading and Packet Construction
-
-```python
-    with open(filepath, "rb") as f:
-        seq = 0
-        
-        while running:
-            chunk = f.read(CHUNK_SIZE)
-            if not chunk:
-                break  # End of file
-            
-            chunk_checksum = checksum(chunk)
-            
-            # Packet: "seq|checksum|binary_data"
-            packet = f"{seq}|{chunk_checksum}|".encode() + chunk
-            encrypted_packet = encrypt_data(packet)
-```
-
-**Packet construction visualized:**
-```
-seq = 5
-chunk = b"\x89PNG\r\n..." (4096 bytes of binary)
-checksum = "a1b2c3d4..."
-
-Step 1: f"{seq}|{chunk_checksum}|"
-        = "5|a1b2c3d4...|"
-
-Step 2: .encode()
-        = b"5|a1b2c3d4...|"
-
-Step 3: + chunk
-        = b"5|a1b2c3d4...|" + b"\x89PNG..."
-        = b"5|a1b2c3d4...|\x89PNG..." (4133 bytes)
-
-Step 4: encrypt_data(packet)
-        = b"gAAAAABn..." (~5600 bytes)
-```
-
-#### 5.4.6 Reliable Delivery with ACK
-
-```python
-            while running and retries < max_retries:
-                client_sock.sendto(encrypted_packet, client_addr)
-                
-                ready = select.select([client_sock], [], [], 2)
-                
-                if ready[0]:
-                    ack_data, _ = client_sock.recvfrom(1024)
-                    ack = decrypt_data(ack_data).decode()
-                    
-                    if ack == f"ACK {seq}":
-                        retries = 0
-                        break
-                    elif ack.startswith("NACK"):
-                        retries += 1
-                else:
-                    retries += 1  # Timeout
-```
-
-**select.select() explained:**
+**`select.select()` explained:**
 ```python
 select.select([sock], [], [], timeout)
-#             ↑       ↑   ↑   ↑
-#             │       │   │   └── Timeout in seconds
-#             │       │   └────── Exception sockets (unused)
-#             │       └────────── Writable sockets (unused)
-#             └────────────────── Readable sockets
+#              ↑       ↑   ↑   ↑
+#              │       │   │   └── Timeout in seconds (2s here)
+#              │       │   └────── Exception sockets (unused)
+#              │       └────────── Writable sockets (unused)
+#              └────────────────── Readable sockets
 
 # Returns: ([readable], [writable], [exception])
-
-# If data available: ready[0] = [sock]
-# If timeout:        ready[0] = []
+# Data available: ready[0] = [sock]
+# Timeout:        ready[0] = []
 ```
 
-**Why select() instead of blocking recv()?**
-- `recv()` blocks indefinitely without timeout
-- `settimeout()` + `recv()` requires exception handling
-- `select()` is more explicit and efficient for this pattern
+**Why `select()` instead of blocking `recv()`?**
+- The window sends multiple packets before waiting; we cannot afford blocking indefinitely
+- `select()` with a 2-second timeout allows efficient retransmission of the whole window on silence
+- More explicit and readable than `settimeout()` + exception handling inside a window loop
 
-#### 5.4.7 Stop-and-Wait ARQ Visualization
+#### 5.4.4 Pause / Cancel Handling
+
+When a client pauses or cancels (via GUI button or `KeyboardInterrupt`), it sends `ERROR Client paused transfer` or `ERROR Client cancelled`. The server detects any `ERROR`-prefixed message and exits the transfer thread cleanly, preserving the partial file on the client side for resumption.
+
+### 5.5 handle_upload() — Upload Handler (Stop-and-Wait)
+
+Uploads use the simpler **Stop-and-Wait** protocol since they originate from the client, which already has full flow control:
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│                    STOP-AND-WAIT ARQ                     │
-├──────────────────────────────────────────────────────────┤
-│                                                          │
-│  Sender                              Receiver            │
-│    │                                    │                │
-│    │──── [Chunk 0] ────────────────────>│                │
-│    │            (wait for ACK)          │                │
-│    │<────────────────────── [ACK 0] ────│                │
-│    │                                    │                │
-│    │──── [Chunk 1] ────────────────────>│                │
-│    │            (wait for ACK)          │                │
-│    │              (TIMEOUT!)            │                │
-│    │──── [Chunk 1] ────────────────────>│ (retransmit)  │
-│    │<────────────────────── [ACK 1] ────│                │
-│    │                                    │                │
-│    │──── [Chunk 2] ────────────────────>│                │
-│    │            (NACK received)         │                │
-│    │<───────────────────── [NACK 2] ────│ (bad checksum)│
-│    │──── [Chunk 2] ────────────────────>│ (retransmit)  │
-│    │<────────────────────── [ACK 2] ────│                │
-│    │                                    │                │
-│    │──── [DONE] ───────────────────────>│                │
-│    │                                    │                │
-└──────────────────────────────────────────────────────────┘
+Client                            Server
+  │                                  │
+  │──── UPLOAD filename filesize ───>│  (main port 9000)
+  │<─── OK session_port ─────────────│
+  │──── READY (to session_port) ────>│
+  │<─── GO ──────────────────────────│
+  │──── seq|checksum|data ──────────>│
+  │<─── ACK seq ─────────────────────│
+  │──── seq|checksum|data ──────────>│
+  │<─── ACK seq (or NACK) ───────────│
+  │  ...                             │
+  │──── DONE ───────────────────────>│
+  │<─── OK ──────────────────────────│
 ```
 
-#### 5.4.8 Cleanup with finally
+**Handshake note:** The server sends `GO` after receiving `READY`. This confirms the session socket is bound and ready to receive chunks — preventing the client from sending data before the server is listening on the session port.
 
-```python
-    finally:
-        client_sock.close()
-        with clients_lock:
-            if session_id in active_clients:
-                del active_clients[session_id]
-```
-
-**Why `finally`?**
-- Executes regardless of how the function exits
-- Normal return, exception, or early return all trigger it
-- Guarantees resource cleanup
-
-### 5.5 handle_upload() Function
-
-(Similar structure to handle_client, but receives data instead of sending)
-
-Key differences:
-- Expects `UPLOAD filename size` command
-- Sends `GO` signal to start receiving
-- Calls `recvfrom()` to get chunks
-- Sends `ACK`/`NACK` responses
-
-### 5.6 main() Function - Event Loop
+### 5.6 Main Loop
 
 ```python
 def main():
     global running
-    
     main_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     main_sock.bind((SERVER_IP, MAIN_PORT))
-    main_sock.settimeout(1)  # 1 second timeout for Ctrl+C handling
-```
-
-**Why 1-second timeout?**
-```python
-# Without timeout:
-data, addr = main_sock.recvfrom(65535)  # Blocks forever
-# Ctrl+C cannot be caught until data arrives
-
-# With timeout:
-while running:
-    try:
-        data, addr = main_sock.recvfrom(65535)
-    except socket.timeout:
-        continue  # Check 'running' flag every 1 second
-```
-
-#### 5.6.1 Main Event Loop
-
-```python
+    main_sock.settimeout(1)
+    ...
     while running:
         try:
             data, addr = main_sock.recvfrom(65535)
-            
             message = decrypt_data(data).decode()
             
             if message.startswith("REQUEST"):
-                # ... spawn download thread
+                parts = message.split()
+                filename = parts[1]
+                resume_seq = int(parts[2]) if len(parts) > 2 else 0
+                ...spawn thread → handle_client(addr, filename, resume_seq)
+
             elif message.startswith("UPLOAD"):
-                # ... spawn upload thread
+                ...spawn thread → handle_upload(addr, filename, filesize)
 ```
 
-**Threading model:**
-```
-Main Thread                Worker Threads
-     │
-     │ recvfrom()
-     │<────────────────── Request from Client 1
-     │
-     │ spawn thread ──────────────────────────> Thread 1: handle_client()
-     │                                                │
-     │ recvfrom()                                     │ (running)
-     │<────────────────── Request from Client 2       │
-     │                                                │
-     │ spawn thread ──────────────────────────> Thread 2: handle_client()
-     │                                                │         │
-     │ recvfrom()                                     │         │
-     │    ...                                         ▼         ▼
-```
+> **Note:** The `LIST` command is handled only in `app.py`'s `_accept_loop()`, not in the CLI `server.py`. The CLI server supports `REQUEST` and `UPLOAD` only.
 
 ---
 
 ## 6. client.py - Detailed Breakdown
 
-### 6.1 download_file() Function
+> `client.py` is the **standalone CLI client**. For GUI use, `FileTransferClient` in `app.py` provides the same functionality with callback-based progress and threading.Event pause/cancel.
 
-#### 6.1.1 Initial Request
+### 6.1 download_file() — Resumable Download
 
-```python
-def download_file(filename):
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.settimeout(5)
-    
-    request = encrypt_data(f"REQUEST {filename}".encode())
-    sock.sendto(request, (SERVER_IP, MAIN_PORT))
-```
-
-**Encryption flow:**
-```
-"REQUEST test.pdf"
-        │
-        ▼ .encode()
-b"REQUEST test.pdf"
-        │
-        ▼ encrypt_data()
-b"gAAAAABn..."
-        │
-        ▼ sendto()
-[Network] ──────────> Server
-```
-
-#### 6.1.2 Parsing Server Response
+#### 6.1.1 Resume Detection
 
 ```python
-    data, server_addr = sock.recvfrom(65535)
-    response = decrypt_data(data).decode()
-    
-    # response = "OK 1048576 54321"
-    parts = response.split()
-    filesize = int(parts[1])     # 1048576
-    session_port = int(parts[2]) # 54321
+resume_seq = 0
+file_mode = "wb"
+if os.path.exists(filepath):
+    existing_size = os.path.getsize(filepath)
+    resume_seq = existing_size // CHUNK_SIZE
+    file_mode = "ab"
+    print(f"[INFO] Partial file detected. Resuming from chunk {resume_seq}...")
 ```
 
-#### 6.1.3 Chunk Reception Loop
+**Integer division:** `existing_size // CHUNK_SIZE` gives the last fully received chunk number. Any trailing partial chunk is discarded (the file is opened in append mode, not truncated).
+
+**File modes:**
+| Mode | Meaning |
+|------|---------|
+| `"wb"` | Write binary — create new file or overwrite existing |
+| `"ab"` | Append binary — write to end of existing file |
+
+#### 6.1.2 Request with Resume Sequence
 
 ```python
-    expected_seq = 0
-    
-    while True:
-        packet, addr = sock.recvfrom(65535)
-        decrypted = decrypt_data(packet)
-        
-        if decrypted == b"DONE":
-            return True
-        
-        # Parse: b"5|a1b2c3...|<binary>"
-        parts = decrypted.split(b"|", 2)
-        seq = int(parts[0])
-        received_checksum = parts[1].decode()
-        chunk = parts[2]
+request = encrypt_data(f"REQUEST {filename} {resume_seq}".encode())
+sock.sendto(request, (SERVER_IP, MAIN_PORT))
 ```
 
-**split(b"|", 2) explained:**
-```python
-data = b"5|a1b2c3|hello|world"
+The resume sequence is embedded in the `REQUEST` command. The server receives this and seeks directly to `resume_seq * CHUNK_SIZE` in the file.
 
-data.split(b"|")      # [b"5", b"a1b2c3", b"hello", b"world"]
-data.split(b"|", 2)   # [b"5", b"a1b2c3", b"hello|world"]
-                      #                    ↑ binary data preserved
-```
-
-**Why maxsplit=2?**
-- The binary chunk might contain `|` byte (0x7C)
-- Without maxsplit, we'd incorrectly split binary data
-- With maxsplit=2, everything after second `|` stays intact
-
-#### 6.1.4 Checksum Verification
+#### 6.1.3 Sliding Window Receiver Logic
 
 ```python
-        if seq == expected_seq:
-            calculated_checksum = checksum(chunk)
-            
-            if calculated_checksum == received_checksum:
-                f.write(chunk)
-                sock.sendto(encrypt_data(f"ACK {seq}".encode()), session_addr)
-                expected_seq += 1
-            else:
-                sock.sendto(encrypt_data(f"NACK {seq}".encode()), session_addr)
-```
-
-**Checksum verification visualized:**
-```
-Received packet:
-  seq = 5
-  received_checksum = "a1b2c3d4..."
-  chunk = b"\x89PNG..."
-
-Calculate locally:
-  calculated_checksum = md5(b"\x89PNG...") = "a1b2c3d4..."
-
-Compare:
-  "a1b2c3d4..." == "a1b2c3d4..."  ✓ MATCH → Send ACK
-  "a1b2c3d4..." != "x9y8z7w6..."  ✗ MISMATCH → Send NACK
-```
-
-#### 6.1.5 Handling Duplicate Packets
-
-```python
-        elif seq < expected_seq:
-            # Already received this chunk, but ACK was lost
-            # Re-send ACK so server can proceed
-            sock.sendto(encrypt_data(f"ACK {seq}".encode()), session_addr)
-```
-
-**Why this happens:**
-```
-Server                              Client
-   │                                   │
-   │──── Chunk 5 ─────────────────────>│
-   │<────────────────────────── ACK 5 ─│
-   │         (ACK 5 lost in network)   │
-   │                                   │
-   │     (timeout, retransmit)         │
-   │──── Chunk 5 ─────────────────────>│
-   │     Client already has chunk 5,   │
-   │<────────────────────────── ACK 5 ─│  (expected_seq is now 6)
-   │                                   │
-   │──── Chunk 6 ─────────────────────>│
-```
-
-### 6.2 upload_file() Function
-
-(Mirror of download logic, but client sends chunks and waits for ACKs)
-
-### 6.3 main() Function - Interactive Menu
-
-```python
-def main():
-    if len(sys.argv) > 1:
-        # Command-line mode
-        action = sys.argv[1].lower()
-        if action == "download":
-            download_file(sys.argv[2])
+if seq == expected_seq:
+    if checksum(chunk) == received_checksum:
+        f.write(chunk)
+        received_bytes += len(chunk)
+        sock.sendto(encrypt_data(f"ACK {seq}".encode()), session_addr)
+        expected_seq += 1
     else:
-        # Interactive mode
-        while True:
-            choice = input("Select option (1/2/3): ")
-            if choice == "3":
-                break
+        sock.sendto(encrypt_data(f"NACK {seq}".encode()), session_addr)
+elif seq < expected_seq:
+    # Duplicate from window retransmission — re-ACK without writing
+    sock.sendto(encrypt_data(f"ACK {seq}".encode()), session_addr)
 ```
 
----
+**Duplicate handling:** Because the server uses a sliding window, the client may receive a chunk it already wrote (if a timeout caused the whole window to be retransmitted). The `seq < expected_seq` branch catches this and re-ACKs without writing duplicate data.
 
-## 7. Protocol State Machine
-
-### 7.1 Download State Machine
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                     CLIENT STATE MACHINE                         │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│    ┌───────────┐                                                │
-│    │   IDLE    │                                                │
-│    └─────┬─────┘                                                │
-│          │ send REQUEST                                         │
-│          ▼                                                      │
-│    ┌───────────────┐                                            │
-│    │ WAIT_METADATA │──── timeout ───> [ERROR]                   │
-│    └───────┬───────┘                                            │
-│            │ recv OK                                            │
-│            ▼                                                    │
-│    ┌───────────────┐                                            │
-│    │  SEND_READY   │                                            │
-│    └───────┬───────┘                                            │
-│            │ send READY                                         │
-│            ▼                                                    │
-│    ┌───────────────┐                                            │
-│    │ WAIT_CHUNK    │──── timeout ───> [ERROR]                   │
-│    └───────┬───────┘                                            │
-│            │ recv chunk                                         │
-│            ▼                                                    │
-│    ┌───────────────┐  checksum fail                             │
-│    │ VERIFY_CHUNK  │───────────────> SEND_NACK ─┐               │
-│    └───────┬───────┘                            │               │
-│            │ checksum OK                        │               │
-│            ▼                                    │               │
-│    ┌───────────────┐                            │               │
-│    │   SEND_ACK    │<───────────────────────────┘               │
-│    └───────┬───────┘                                            │
-│            │                                                    │
-│            ├───── more chunks ────> WAIT_CHUNK                  │
-│            │                                                    │
-│            └───── recv DONE ────> [SUCCESS]                     │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-### 7.2 Server Download State Machine
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                     SERVER STATE MACHINE                         │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│    ┌───────────┐                                                │
-│    │ LISTENING │ <──────────────────────────────────────────┐   │
-│    └─────┬─────┘                                             │   │
-│          │ recv REQUEST                                      │   │
-│          ▼                                                   │   │
-│    ┌───────────────┐                                         │   │
-│    │ CHECK_FILE    │──── not found ───> SEND_ERROR ──────────┘   │
-│    └───────┬───────┘                                             │
-│            │ file exists                                         │
-│            ▼                                                     │
-│    ┌───────────────┐                                             │
-│    │ SEND_METADATA │                                             │
-│    └───────┬───────┘                                             │
-│            │ send OK + session_port                              │
-│            ▼                                                     │
-│    ┌───────────────┐                                             │
-│    │ WAIT_READY    │──── timeout ───> [ABORT] ───────────────────┤
-│    └───────┬───────┘                                             │
-│            │ recv READY                                          │
-│            ▼                                                     │
-│    ┌───────────────┐                                             │
-│    │  READ_CHUNK   │──── EOF ───> SEND_DONE ─────────────────────┤
-│    └───────┬───────┘                                             │
-│            │ chunk available                                     │
-│            ▼                                                     │
-│    ┌───────────────┐                                             │
-│    │  SEND_CHUNK   │                                             │
-│    └───────┬───────┘                                             │
-│            │                                                     │
-│            ▼                                                     │
-│    ┌───────────────┐  timeout or NACK                           │
-│    │   WAIT_ACK    │──────────────────> RETRY ──┐               │
-│    └───────┬───────┘                            │               │
-│            │ recv ACK                           │               │
-│            │                                    │               │
-│            └────────────────────────────────────┴──> READ_CHUNK │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
-```
-
----
-
-## 8. Concurrency Model
-
-### 8.1 Thread Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                         PROCESS                                  │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │                    MAIN THREAD                           │    │
-│  │                                                          │    │
-│  │  main_sock (port 9000)                                   │    │
-│  │       │                                                  │    │
-│  │       │ recvfrom() ─── blocking (with 1s timeout)       │    │
-│  │       │                                                  │    │
-│  │       ├──── REQUEST ───> spawn Thread A                 │    │
-│  │       ├──── UPLOAD ────> spawn Thread B                 │    │
-│  │       └──── REQUEST ───> spawn Thread C                 │    │
-│  │                                                          │    │
-│  └─────────────────────────────────────────────────────────┘    │
-│                                                                  │
-│  ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐    │
-│  │    THREAD A     │ │    THREAD B     │ │    THREAD C     │    │
-│  │                 │ │                 │ │                 │    │
-│  │ client_sock     │ │ client_sock     │ │ client_sock     │    │
-│  │ (port 50001)    │ │ (port 50002)    │ │ (port 50003)    │    │
-│  │                 │ │                 │ │                 │    │
-│  │ handle_client() │ │ handle_upload() │ │ handle_client() │    │
-│  │                 │ │                 │ │                 │    │
-│  └─────────────────┘ └─────────────────┘ └─────────────────┘    │
-│                                                                  │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │                   SHARED RESOURCES                       │    │
-│  │                                                          │    │
-│  │  active_clients = {                                      │    │
-│  │      "127.0.0.1:54321": True,  # Thread A               │    │
-│  │      "127.0.0.1:54322": True,  # Thread B               │    │
-│  │      "127.0.0.1:54323": True,  # Thread C               │    │
-│  │  }                                                       │    │
-│  │                                                          │    │
-│  │  clients_lock = threading.Lock()  # Protects dictionary │    │
-│  │                                                          │    │
-│  └─────────────────────────────────────────────────────────┘    │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-### 8.2 Thread Lifecycle
+#### 6.1.4 Pause via KeyboardInterrupt (CLI)
 
 ```python
-# Thread creation
-t = threading.Thread(target=handle_client, args=(addr, filename))
-t.daemon = True   # Thread dies when main thread exits
-t.start()         # Begin execution
+except KeyboardInterrupt:
+    print(f"\n[PAUSED] Transfer manually paused.")
+    stop_msg = encrypt_data(b"ERROR Client paused transfer")
+    sock.sendto(stop_msg, session_addr)
+    sock.close()
+    return False
 ```
 
-**Daemon thread behavior:**
+The partial file remains on disk. The next invocation of `download_file()` will detect it, compute `resume_seq`, and continue from where it left off.
+
+### 6.2 upload_file() — Stop-and-Wait Upload
+
+Uploads use classic Stop-and-Wait with up to 5 retries per chunk:
+
+```python
+while retries < max_retries:
+    sock.sendto(packet, session_addr)
+    try:
+        ack_data, _ = sock.recvfrom(1024)
+        ack = decrypt_data(ack_data).decode()
+        if ack == f"ACK {seq}":
+            retries = 0
+            break
+        elif ack.startswith("NACK"):
+            retries += 1
+    except socket.timeout:
+        retries += 1
+```
+
+If `max_retries` is exceeded, the upload is aborted and `False` is returned.
+
+---
+
+## 7. app.py — Protocol Adapters & GUI
+
+`app.py` is the main entry point for the graphical application. It contains three logical sections:
+
+1. **`FileTransferServer`** — class-based server adapter
+2. **`FileTransferClient`** — class-based client adapter
+3. **GUI layer** — Tkinter screen and widget classes
+
+### 7.1 FileTransferServer Class
+
+```python
+class FileTransferServer:
+    def __init__(self, files_dir, port, log_cb, transfer_cb):
+        self.files_dir = files_dir
+        self.port = port
+        self.log_cb = log_cb          # fn(message, tag?) → update log UI
+        self.transfer_cb = transfer_cb # fn(event_dict)   → update progress UI
+        self._running = False
+        ...
+```
+
+**Callbacks instead of print():**
+
+| Callback | Signature | Used for |
+|----------|-----------|----------|
+| `log_cb` | `(msg: str, tag: str = "info")` | Server log messages |
+| `transfer_cb` | `(event: dict)` | Progress updates to GUI |
+
+**Transfer event dict structure:**
+```python
+# Transfer starting
+{"tid": session_id, "event": "start",    "filename": ..., "total": ..., "sent": ...}
+# Progress update
+{"tid": session_id, "event": "progress", "sent": bytes_sent_so_far}
+# Transfer complete
+{"tid": session_id, "event": "done"}
+# Transfer failed
+{"tid": session_id, "event": "error",    "detail": "...reason..."}
+```
+
+#### 7.1.1 LIST Command (New in dev branch)
+
+```python
+elif message == "LIST":
+    files = []
+    for f in os.listdir(self.files_dir):
+        p = os.path.join(self.files_dir, f)
+        if os.path.isfile(p):
+            files.append({
+                "name": f,
+                "size": os.path.getsize(p),
+                "modified": os.path.getmtime(p)
+            })
+    resp = "FILELIST " + json.dumps(files)
+    self.main_sock.sendto(encrypt_data(resp.encode()), addr)
+```
+
+`LIST` serves two purposes:
+1. **File browser** — the GUI uses it to populate the download table
+2. **Connection test** — `FileTransferClient.connect()` sends `LIST` and checks for a `FILELIST` response to confirm the server is reachable
+
+**Response format:** `FILELIST [{"name": "...", "size": N, "modified": N}, ...]`
+
+### 7.2 FileTransferClient Class
+
+```python
+class FileTransferClient:
+    def __init__(self, host, port, download_dir, log_cb):
+        ...
+        self.connected = False
+```
+
+**Key methods:**
+
+| Method | Description |
+|--------|-------------|
+| `connect()` | Sends `LIST`, verifies `FILELIST` response, sets `self.connected = True` |
+| `disconnect()` | Sets `self.connected = False` |
+| `list_files()` | Returns `List[dict]` of file metadata from server |
+| `download(filename, prog_cb, cancel_evt, pause_evt)` | Resumable download with GUI callbacks |
+| `upload(filepath, prog_cb, cancel_evt, pause_evt)` | Stop-and-Wait upload with GUI callbacks |
+
+#### 7.2.1 Pause and Cancel via threading.Event
+
+Unlike the CLI which uses `KeyboardInterrupt`, the GUI uses `threading.Event` objects that the GUI thread can set at any time:
+
+```python
+def download(self, filename, prog_cb, cancel_evt, pause_evt):
+    ...
+    while True:
+        if cancel_evt.is_set():
+            sock.sendto(encrypt_data(b"ERROR Client cancelled"), session_addr)
+            raise Cancelled("Cancelled by user")
+        if pause_evt.is_set():
+            sock.sendto(encrypt_data(b"ERROR Client paused transfer"), session_addr)
+            raise Cancelled("Paused by user")
+        ...
+```
+
+**Event flow:**
+```
+GUI Thread                         Transfer Thread
+    │                                    │
+    │  User clicks ⏸ Pause              │
+    │─── pause_evt.set() ───────────────>│
+    │                                    │  (checks at top of recv loop)
+    │                                    │──> sends ERROR to server
+    │                                    │──> raises Cancelled
+    │                                    │
+    │  Thread exits, partial file saved  │
+    │  Next download auto-resumes        │
+```
+
+#### 7.2.2 Real-Time Progress Callback
+
+```python
+now = time.time()
+if now - last_update > 0.1:   # throttle to max 10 updates/sec
+    speed = (received_bytes / 1024 / 1024) / max(0.001, now - start_time)
+    frac = received_bytes / filesize if filesize > 0 else 1.0
+    prog_cb(frac, speed)
+    last_update = now
+```
+
+`prog_cb(frac, speed)` is called at most 10 times per second to avoid flooding the Tkinter event loop. `frac` is `0.0 – 1.0`, `speed` is MB/s.
+
+## 7.3 GUI
+**Thread-safe GUI updates (queue pattern):**
+
+The transfer threads run in background threads and cannot touch Tkinter widgets directly (Tkinter is not thread-safe). Instead they push events onto a `queue.Queue`, which is drained by `_poll()` running every 100ms on the main thread via `self.after(100, self._poll)`.
+
+```
+Transfer Thread                  Main (GUI) Thread
+      │                                │
+      │ self._q.put(("progress", ...)) │
+      │                                │
+      │                         _poll() fires every 100ms
+      │                                │
+      │                    item = self._q.get_nowait()
+      │                    row.update_progress(frac, speed)
+```
+
+---
+
+## 8. Protocol State Machine
+
+### 8.1 Complete Command Reference
+
+| Command | Direction | Format | Response |
+|---------|-----------|--------|----------|
+| `LIST` | Client → Server | `LIST` | `FILELIST <json>` |
+| `REQUEST` | Client → Server | `REQUEST <filename> <resume_seq>` | `OK <filesize> <session_port>` or `ERROR ...` |
+| `UPLOAD` | Client → Server | `UPLOAD <filename> <filesize>` | `OK <session_port>` or `ERROR ...` |
+| `READY` | Client → Server | `READY` | (triggers data flow) |
+| `GO` | Server → Client | `GO` | (upload only, confirms session ready) |
+| `ACK` | Bidirectional | `ACK <seq>` | — |
+| `NACK` | Bidirectional | `NACK <seq>` | — |
+| `DONE` | Sender → Receiver | `DONE` | `OK` (upload only) |
+| `ERROR` | Either | `ERROR <reason>` | — |
+
+### 8.2 Download State Machine
+
+```
+Client State                          Server State
+────────────────────────────────────────────────────
+IDLE                                  LISTENING (port 9000)
+  │                                       │
+  │── REQUEST filename resume_seq ───────>│
+  │                                  DISPATCHING
+  │                                  (spawn thread, bind session port)
+  │                                       │
+  │<── OK filesize session_port ──────────│
+HANDSHAKING                          SESSION_READY (port N)
+  │                                       │
+  │── READY (to session port) ───────────>│
+  │                                  SENDING
+  │                                  (fill window, send chunks)
+RECEIVING                                 │
+  │<── seq|checksum|chunk ────────────────│  (up to 5 in-flight)
+  │── ACK seq ───────────────────────────>│
+  │  ... (window slides) ...              │
+  │── ERROR (if paused/cancelled) ───────>│ → ABORTED
+  │<── DONE ──────────────────────────────│
+COMPLETE                             COMPLETE
+```
+
+### 8.3 Upload State Machine
+
+```
+Client State                          Server State
+────────────────────────────────────────────────────
+IDLE                                  LISTENING (port 9000)
+  │                                       │
+  │── UPLOAD filename filesize ──────────>│
+  │                                  DISPATCHING
+  │<── OK session_port ───────────────────│
+  │                                  SESSION_READY (port N)
+  │── READY ─────────────────────────────>│
+  │<── GO ────────────────────────────────│
+SENDING                              RECEIVING
+  │── seq|checksum|chunk ───────────────>│  (Stop-and-Wait)
+  │<── ACK seq ──────────────────────────│
+  │── seq|checksum|chunk ───────────────>│
+  │<── NACK seq (retry) ─────────────────│
+  │  ...                                 │
+  │── DONE ─────────────────────────────>│
+  │<── OK ───────────────────────────────│
+COMPLETE                             COMPLETE
+```
+
+---
+
+## 9. Concurrency Model
+
+### 9.1 Thread Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     Main / GUI Thread                        │
+│                                                              │
+│  Tkinter mainloop()  ←──── _poll() every 100ms              │
+│                                  │                           │
+│                            queue.Queue                       │
+│                                  ▲                           │
+│  ┌───────────────────────────────│─────────────────────────┐ │
+│  │           Background Threads (all daemon=True)           │ │
+│  │                                                          │ │
+│  │  _accept_loop   handle_client  handle_upload  _dl_thread │ │
+│  │  (server loop)  (one per DL)   (one per UL)  (GUI DL)   │ │
+│  │                                                          │ │
+│  └──────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 9.2 Thread Lifecycle
+
+```python
+t = threading.Thread(target=handle_client, args=(addr, filename, resume_seq))
+t.daemon = True    # Thread dies when main thread exits
+t.start()
+```
+
+**Daemon thread behaviour:**
 ```
 NON-DAEMON (default):
   Main thread exits → Waits for worker threads to complete
-  
+
 DAEMON (t.daemon = True):
   Main thread exits → Worker threads immediately terminated
-  
+
 We use daemon threads because:
-  - If user presses Ctrl+C, server should exit immediately
-  - Ongoing transfers are abandoned (acceptable behavior)
+  - If user closes the window, all transfers are abandoned
+  - Prevents zombie processes hanging after GUI exit
 ```
 
-### 8.3 Lock Usage Pattern
+### 9.3 Lock Usage Pattern
 
 ```python
-# CORRECT - Context manager (auto-release)
+# CORRECT - Context manager (auto-release on exception too)
 with clients_lock:
     if session_id in active_clients:
-        return  # Lock automatically released
+        return
     active_clients[session_id] = True
-# Lock released here
+# Lock released here automatically
 
-# INCORRECT - Manual (error-prone)
+# INCORRECT - Manual (error-prone, easy to miss release on early return)
 clients_lock.acquire()
 if session_id in active_clients:
     clients_lock.release()  # Easy to forget!
@@ -1066,138 +1025,161 @@ active_clients[session_id] = True
 clients_lock.release()
 ```
 
+### 9.4 threading.Event for Pause / Cancel (GUI)
+
+```python
+cancel_evt = threading.Event()
+pause_evt  = threading.Event()
+
+# GUI thread sets the event:
+cancel_evt.set()   # signals transfer thread to abort
+pause_evt.set()    # signals transfer thread to pause
+
+# Transfer thread checks atomically:
+if cancel_evt.is_set(): raise Cancelled(...)
+if pause_evt.is_set():  raise Cancelled(...)
+```
+
+`threading.Event` is thread-safe by design — no lock needed. `is_set()` returns `True` immediately after `set()` is called from any thread.
+
 ---
 
-## 9. Error Handling Deep Dive
+## 10. Error Handling Deep Dive
 
-### 9.1 Error Types and Handling
+### 10.1 Error Types and Handling
 
 | Error Type | Cause | Handling |
 |------------|-------|----------|
 | `socket.timeout` | No response within timeout | Retry or abort |
-| `FileNotFoundError` | File doesn't exist | Send ERROR message |
-| `cryptography.fernet.InvalidToken` | Decryption failed | Log warning, ignore packet |
-| `ValueError` | Malformed packet | Ignore packet |
-| `KeyboardInterrupt` | User pressed Ctrl+C | Graceful shutdown |
+| `FileNotFoundError` | File doesn't exist on server | Send `ERROR File not found` |
+| `cryptography.fernet.InvalidToken` | Decryption failed (corrupt or wrong key) | Silently `continue` (ignore packet) |
+| `ValueError` | Malformed packet (bad split) | Silently `continue` |
+| `Cancelled` | User pause/cancel via Event | Save state, notify server via `ERROR` |
+| `KeyboardInterrupt` (CLI) | User pressed Ctrl+C during download | Save partial file, send `ERROR` to server |
+| `OSError` | Socket closed mid-transfer | Caught in outer `except Exception` |
 
-### 9.2 Exception Handling Pattern
+### 10.2 Exception Handling Pattern
 
 ```python
 try:
-    # Main operation
     packet = sock.recvfrom(65535)
     decrypted = decrypt_data(packet)
-    
+
 except socket.timeout:
     # Expected: no data within timeout
-    # Action: retry or continue loop
     continue
-    
+
 except cryptography.fernet.InvalidToken:
-    # Possible attack or corruption
-    # Action: log and ignore
-    print("[WARN] Decryption failed")
+    # Possible corruption or wrong key
     continue
-    
+
 except Exception as e:
-    # Unexpected error
-    # Action: log and abort
     print(f"[ERROR] {e}")
     return False
-    
+
 finally:
-    # Cleanup: always executed
-    sock.close()
+    sock.close()   # Always executed, even on exception
 ```
 
-### 9.3 Graceful Shutdown
+### 10.3 Graceful Shutdown (CLI Server)
 
 ```python
 running = True
 
-def main():
-    global running
-    
-    try:
-        while running:
-            # ... main loop
-            
-    except KeyboardInterrupt:
-        print("\n[SERVER] Shutdown requested...")
-        running = False  # Signal threads to stop
-        
-    finally:
-        main_sock.close()
-        # Daemon threads auto-terminate
+try:
+    while running:
+        ...  # main loop
+
+except KeyboardInterrupt:
+    print("\n[SERVER] Shutdown requested...")
+    running = False
+
+finally:
+    main_sock.close()
+    # Daemon threads auto-terminate
 ```
+
+### 10.4 Graceful Shutdown (GUI Server)
+
+```python
+def stop(self):
+    self._running = False      # Signals _accept_loop and _handle_client to exit
+    if self.main_sock:
+        self.main_sock.close() # Unblocks recvfrom()
+    self.log_cb("Server stopped")
+```
+
+`self._running = False` is checked at the top of every `while` loop in server threads, ensuring clean exit without abrupt socket closure.
 
 ---
 
-## 10. Network Byte Flow
+## 11. Network Byte Flow
 
-### 10.1 Complete Download Sequence
+### 11.1 Complete Download Sequence (Sliding Window)
 
 ```
 Time  Client                    Network                    Server
 ─────────────────────────────────────────────────────────────────────
   │
-  │   ┌─────────────────┐
-  │   │ sock.sendto()   │
-t1│   │ "REQUEST test"  │ ──UDP──[encrypted]──────────> Port 9000
-  │   └─────────────────┘                               │
-  │                                                     ▼
-  │                                              ┌─────────────┐
-  │                                              │ recvfrom()  │
-  │                                              │ decrypt()   │
-  │                                              │ spawn thread│
-  │                                              └─────────────┘
-  │                                                     │
-  │                                              Port 54321 created
-  │                                                     │
-  │   ┌─────────────────┐                              ▼
-t2│   │ recvfrom()      │ <──UDP──[encrypted]── "OK 1024 54321"
-  │   │ parse response  │
-  │   └─────────────────┘
+  │   ┌─────────────────────┐
+  │   │ "REQUEST test.zip 0"│
+t1│   │  (or resume_seq > 0)│──UDP──[encrypted]──────────> Port 9000
+  │   └─────────────────────┘                              │
+  │                                                        ▼
+  │                                               ┌─────────────────┐
+  │                                               │ decrypt, parse  │
+  │                                               │ spawn thread    │
+  │                                               │ bind port 54321 │
+  │                                               └─────────────────┘
+  │   ┌─────────────────────┐                             │
+t2│   │ recvfrom()          │<──UDP──[encrypted]── "OK 2097152 54321"
+  │   │ parse filesize+port │
+  │   └─────────────────────┘
   │           │
   │           ▼
-  │   ┌─────────────────┐
-t3│   │ sendto(54321)   │ ──UDP──[encrypted]──────────> Port 54321
-  │   │ "READY"         │                               │
-  │   └─────────────────┘                              ▼
-  │                                              ┌─────────────┐
-  │                                              │ recvfrom()  │
-  │                                              │ open file   │
-  │                                              │ read chunk  │
-  │                                              └─────────────┘
-  │                                                     │
-  │   ┌─────────────────┐                              ▼
-t4│   │ recvfrom()      │ <──UDP──[encrypted]── "0|checksum|data"
-  │   │ verify checksum │
-  │   │ write to file   │
-  │   └─────────────────┘
+  │   ┌─────────────────────┐
+t3│   │ "READY" → port 54321│──UDP──[encrypted]──────────> Port 54321
+  │   └─────────────────────┘                              │
+  │                                                        ▼
+  │                                               ┌─────────────────┐
+  │                                               │ fill window (5) │
+  │                                               │ send chunks 0-4 │
+  │                                               └─────────────────┘
+  │   ┌─────────────────────┐                             │
+t4│   │ recv "0|chksum|data"│<──────────────────── Chunk 0│
+  │   │ recv "1|chksum|data"│<──────────────────── Chunk 1│  (5 in-flight)
+  │   │ recv "2|chksum|data"│<──────────────────── Chunk 2│
+  │   │ recv "3|chksum|data"│<──────────────────── Chunk 3│
+  │   │ recv "4|chksum|data"│<──────────────────── Chunk 4│
+  │   └─────────────────────┘
   │           │
-  │           ▼
-  │   ┌─────────────────┐
-t5│   │ sendto(54321)   │ ──UDP──[encrypted]──────────> Port 54321
-  │   │ "ACK 0"         │                               │
-  │   └─────────────────┘                              ▼
-  │                                              ┌─────────────┐
-  │                                              │ recvfrom()  │
-  │   ... (repeat for each chunk) ...            │ read next   │
-  │                                              └─────────────┘
-  │                                                     │
-  │   ┌─────────────────┐                              ▼
-t6│   │ recvfrom()      │ <──UDP──[encrypted]───────── "DONE"
-  │   │ close file      │
-  │   └─────────────────┘
+  │    verify checksum
+  │    write to file
+  │           │
+  │   ┌─────────────────────┐
+t5│   │ "ACK 0"             │──────────────────────────────> Port 54321
+  │   │ "ACK 1"             │──────────────────────────────>
+  │   │  ...                │
+  │   └─────────────────────┘                              │
+  │                                                   window slides
+  │                                               ┌─────────────────┐
+  │                                               │ send chunks 5-9 │
+  │                                               └─────────────────┘
+  │     ... (repeat for each window) ...
+  │
+  │   ┌─────────────────────┐                             │
+t6│   │ recv "DONE"         │<──UDP──[encrypted]──────────┘
+  │   │ close file          │
+  │   │ prog_cb(1.0, speed) │
+  │   └─────────────────────┘
   │
   ▼   [COMPLETE]
 ```
 
-### 10.2 Packet Contents at Each Layer
+### 11.2 Packet Contents at Each Layer
 
 ```
-Application Data: b"REQUEST test.pdf"
+Application Data: b"REQUEST test.zip 0"
 
 After encryption (Fernet):
 ┌────────────────────────────────────────────────────────┐
@@ -1206,10 +1188,17 @@ After encryption (Fernet):
 └────────────────────────────────────────────────────────┘
 │<────────────────── Base64 encoded ───────────────────>│
 
+Data chunk packet (before encryption):
+┌────────────────────────────────────────────────────────┐
+│  seq  │  |  │     MD5 checksum (32 hex)    │  |  │ data│
+│ "42"  │ "|" │  "a1b2c3d4e5f6..."          │ "|" │ 4KB │
+└────────────────────────────────────────────────────────┘
+      split(b"|", 2) → [b"42", b"a1b2...", b"<data>"]
+
 After UDP encapsulation:
 ┌────────────────────────────────────────────────────────┐
 │ UDP Header │           Encrypted Payload               │
-│   (8B)     │              (~100 bytes)                 │
+│   (8B)     │              (~5600 bytes)                │
 ├────────────┼───────────────────────────────────────────┤
 │ Src Port   │ gAAAAABn...                               │
 │ Dst Port   │                                           │
@@ -1220,7 +1209,7 @@ After UDP encapsulation:
 After IP encapsulation:
 ┌────────────────────────────────────────────────────────┐
 │ IP Header  │ UDP Header │     Encrypted Payload       │
-│  (20B)     │   (8B)     │        (~100 bytes)         │
+│  (20B)     │   (8B)     │        (~5600 bytes)        │
 ├────────────┼────────────┼─────────────────────────────┤
 │ Src IP     │ Src Port   │ gAAAAABn...                 │
 │ Dst IP     │ Dst Port   │                             │
@@ -1233,15 +1222,16 @@ After IP encapsulation:
 
 ## Summary
 
-This documentation covers:
+This documentation covers the full implementation:
 
-1. **Socket Programming** - UDP socket creation, binding, sending, receiving
-2. **Encryption** - Fernet's AES-128-CBC + HMAC-SHA256 implementation
-3. **Integrity** - MD5 checksum calculation and verification
-4. **Reliability** - Stop-and-Wait ARQ with ACK/NACK/retransmission
-5. **Multi-client** - Threading model with dynamic port assignment
-6. **Protocol** - State machines and message formats
-7. **Error Handling** - Exception handling patterns
-8. **Byte Flow** - Complete network packet visualization
-
-This should give you everything you need to explain the technical implementation during your demo!
+1. **Socket Programming** — UDP socket creation, binding, sending, receiving, `select()`
+2. **Encryption** — Fernet's AES-128-CBC + HMAC-SHA256, shared key lifecycle
+3. **Integrity** — MD5 checksum calculation, verification, and `verify_checksum()` helper
+4. **Reliability** — Sliding Window Go-Back-N ARQ (server → client downloads) and Stop-and-Wait ARQ (client → server uploads)
+5. **Resume** — `REQUEST <filename> <resume_seq>`, server `f.seek()`, client append mode
+6. **Pause/Cancel** — `threading.Event` in GUI mode, `KeyboardInterrupt` in CLI mode; both send `ERROR` to peer
+7. **File Listing** — `LIST` / `FILELIST <json>` command for browsing and connection testing
+8. **Multi-client** — Per-session daemon threads, ephemeral port assignment, `threading.Lock` for session registry
+9. **GUI Architecture** — Class-based adapters, queue-based thread-safe UI updates, `_poll()` pattern, `TransferRow` with live progress
+10. **Protocol** — Full command reference, state machines for download and upload flows
+11. **Byte Flow** — Complete network packet visualization for the sliding window download sequence
