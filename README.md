@@ -139,6 +139,13 @@ This protocol achieves scalability and performance by decoupling the initial han
 3. **Isolated Transfer Streams**: The client switches its target to the new session port. This ensures that massive file chunks do not clog the main listener, allowing the server to handle high concurrency efficiently.
 
 ---
+---
+
+## 📝 Notes for Beginners
+
+Ensure Python 3.12+ is installed before setup
+If GUI fails, install dependencies manually using pip
+Use localhost (127.0.0.1) for testing on same machine
 
 ## 📁 File Structure
 
