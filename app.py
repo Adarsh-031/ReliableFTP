@@ -78,12 +78,13 @@ class FileTransferServer:
                 elif message.startswith("UPLOAD"):
                     parts = message.split()
                     filename, filesize = parts[1], int(parts[2])
-                    
+                    resume_seq = int(parts[3]) if len(parts) > 3 else 0
+
                     with self.clients_lock:
                         if session_id in self.active_clients: continue
                         self.active_clients[session_id] = True
-                    
-                    t = threading.Thread(target=self._handle_upload, args=(addr, filename, filesize))
+
+                    t = threading.Thread(target=self._handle_upload, args=(addr, filename, filesize, resume_seq))
                     t.daemon = True
                     t.start()
 
@@ -196,7 +197,7 @@ class FileTransferServer:
                 if session_id in self.active_clients:
                     del self.active_clients[session_id]
 
-    def _handle_upload(self, client_addr, filename, filesize):
+    def _handle_upload(self, client_addr, filename, filesize, resume_seq=0):
         session_id = f"{client_addr[0]}:{client_addr[1]}"
         client_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         session_port = self._get_free_port()
@@ -214,12 +215,15 @@ class FileTransferServer:
             except socket.timeout: return
 
             client_sock.sendto(encrypt_data(b"GO"), client_addr)
-            self.transfer_cb({"tid": session_id, "event": "start", "filename": filename, "total": filesize, "sent": 0})
 
-            expected_seq = 0
-            received_bytes = 0
+            expected_seq = resume_seq
+            received_bytes = resume_seq * CHUNK_SIZE
+            file_mode = "ab" if resume_seq > 0 else "wb"
+            if resume_seq > 0:
+                self.log_cb(f"[RESUME] Upload from chunk {resume_seq} for {session_id}")
+            self.transfer_cb({"tid": session_id, "event": "start", "filename": filename, "total": filesize, "sent": received_bytes})
 
-            with open(filepath, "wb") as f:
+            with open(filepath, file_mode) as f:
                 while self._running:
                     try:
                         packet, _ = client_sock.recvfrom(65535)
@@ -400,10 +404,21 @@ class FileTransferClient:
 
         filename = os.path.basename(filepath)
         filesize = os.path.getsize(filepath)
+
+        # Check for saved upload progress
+        progress_file = f"{filepath}.upload_progress"
+        resume_seq = 0
+        if os.path.exists(progress_file):
+            try:
+                with open(progress_file, "r") as pf:
+                    resume_seq = int(pf.read().strip())
+            except Exception:
+                resume_seq = 0
+
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.settimeout(5)
 
-        sock.sendto(encrypt_data(f"UPLOAD {filename} {filesize}".encode()), (self.host, self.port))
+        sock.sendto(encrypt_data(f"UPLOAD {filename} {filesize} {resume_seq}".encode()), (self.host, self.port))
 
         try:
             data, _ = sock.recvfrom(65535)
@@ -424,9 +439,15 @@ class FileTransferClient:
                 raise Exception("Server not responding")
 
             with open(filepath, "rb") as f:
-                seq, sent_bytes, retries, max_retries = 0, 0, 0, 5
+                seq = resume_seq
+                sent_bytes = resume_seq * CHUNK_SIZE
+                retries = 0
+                max_retries = 5
                 start_time = time.time()
                 last_update = start_time
+
+                if resume_seq > 0:
+                    f.seek(resume_seq * CHUNK_SIZE)
 
                 while True:
                     if cancel_evt.is_set():
@@ -447,7 +468,7 @@ class FileTransferClient:
                         try:
                             ack_data, _ = sock.recvfrom(1024)
                             ack = decrypt_data(ack_data).decode()
-                            
+
                             if ack == f"ACK {seq}":
                                 sent_bytes += len(chunk)
                                 now = time.time()
@@ -468,20 +489,26 @@ class FileTransferClient:
                     if retries >= max_retries:
                         raise Exception("Max retries reached")
                     seq += 1
+                    # Save progress after each confirmed chunk
+                    with open(progress_file, "w") as pf:
+                        pf.write(str(seq))
 
             sock.sendto(encrypt_data(b"DONE"), session_addr)
-            
+
             # Compute final throughput
             total_time = max(0.001, time.time() - start_time)
             final_speed = (sent_bytes / 1024 / 1024) / total_time
             prog_cb(1.0, final_speed)
-            
+
             try:
                 confirm_data, _ = sock.recvfrom(2000)
                 if decrypt_data(confirm_data).decode() == "OK":
+                    # Clean up progress file on successful completion
+                    if os.path.exists(progress_file):
+                        os.remove(progress_file)
                     return
             except socket.timeout:
-                pass 
+                pass
 
         finally:
             sock.close()
@@ -627,11 +654,15 @@ class LogBox(tk.Frame):
 # ── TransferRow — one entry in the transfer list ──────────────────────────────
 
 class TransferRow(tk.Frame):
-    def __init__(self, parent, filename, direction, on_pause, on_cancel):
+    def __init__(self, parent, filename, direction, on_pause, on_resume, on_cancel, on_dismiss):
         super().__init__(
             parent, bg=SURFACE, highlightbackground=BORDER, highlightthickness=1
         )
-        self._paused = False
+        self._state = "active"   # active | paused | done | error
+        self._on_pause = on_pause
+        self._on_resume = on_resume
+        self._on_cancel = on_cancel
+        self._on_dismiss = on_dismiss
         self._last_speed = 0.0
 
         icon = "⬇" if direction == "dl" else "⬆"
@@ -642,12 +673,10 @@ class TransferRow(tk.Frame):
         self._speed_lbl = Label(self, text="", muted=True)
         self._speed_lbl.pack(side="left", padx=4)
 
-        self._cancel_btn = Btn(self, "✕", style="danger", command=on_cancel)
+        self._cancel_btn = Btn(self, "✕", style="danger", command=self._handle_cancel)
         self._cancel_btn.pack(side="right", padx=4, pady=4)
 
-        self._pause_btn = Btn(
-            self, "⏸", style="warn", command=self._toggle_pause(on_pause)
-        )
+        self._pause_btn = Btn(self, "⏸", style="warn", command=self._handle_pause_resume)
         self._pause_btn.pack(side="right", padx=2, pady=4)
 
         self._bar_var = tk.DoubleVar(value=0.0)
@@ -662,32 +691,52 @@ class TransferRow(tk.Frame):
         self._pct_lbl = Label(self, text="0 %", muted=True, width=5, anchor="e")
         self._pct_lbl.pack(side="right")
 
-    def _toggle_pause(self, callback):
-        def inner():
-            self._paused = not self._paused
-            self._pause_btn.configure(text="▶" if self._paused else "⏸")
-            callback(self._paused)
+    def _handle_cancel(self):
+        if self._state == "active":
+            self._on_cancel()
+        else:
+            # Paused, done, or error — dismiss the card directly
+            self._on_dismiss()
 
-        return inner
+    def _handle_pause_resume(self):
+        if self._state == "active":
+            self._on_pause()
+        elif self._state == "paused":
+            self._on_resume()
 
     def update_progress(self, fraction: float, speed: float):
         self._bar_var.set(fraction)
-        self._pct_lbl.configure(text=f"{fraction*100:.0f} %")
+        self._pct_lbl.configure(text=f"{fraction*100:.0f} %", fg=TEXT)
         self._last_speed = speed
-        self._speed_lbl.configure(text=f"{speed:.2f} MB/s")
+        self._speed_lbl.configure(text=f"{speed:.2f} MB/s", fg=MUTED)
+
+    def mark_active(self):
+        self._state = "active"
+        self._pause_btn.configure(text="⏸", style="warn", state="normal")
+        self._cancel_btn.configure(state="normal")
+        self._speed_lbl.configure(text="Resuming...", fg=ACCENT)
+        self._pct_lbl.configure(fg=TEXT)
+
+    def mark_paused(self):
+        self._state = "paused"
+        self._pause_btn.configure(text="▶", style="success")
+        self._speed_lbl.configure(text="Paused — ▶ to resume", fg=WARN)
+        self._pct_lbl.configure(fg=WARN)
 
     def mark_done(self):
+        self._state = "done"
         self._bar_var.set(1.0)
         self._pct_lbl.configure(text="100 %", fg=SUCCESS)
-        self._speed_lbl.configure(text=f"✓ Done ({self._last_speed:.2f} MB/s)")
+        self._speed_lbl.configure(text=f"✓ Done ({self._last_speed:.2f} MB/s)", fg=SUCCESS)
         self._pause_btn.configure(state="disabled")
         self._cancel_btn.configure(state="disabled")
 
     def mark_error(self, msg=""):
+        self._state = "error"
         self._pct_lbl.configure(text="ERR", fg=DANGER)
-        self._speed_lbl.configure(text=msg[:30])
+        self._speed_lbl.configure(text=msg[:40], fg=DANGER)
         self._pause_btn.configure(state="disabled")
-        self._cancel_btn.configure(state="disabled")
+        # Keep ✕ active so user can dismiss the card
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -893,9 +942,11 @@ class ServerScreen(tk.Frame):
             row = TransferRow(
                 self._xfr_frame,
                 fn,
-                "dl" if "download" in fn else "ul", 
-                on_pause=lambda p: None,
+                "dl" if "download" in fn else "ul",
+                on_pause=lambda: None,
+                on_resume=lambda: None,
                 on_cancel=lambda: None,
+                on_dismiss=lambda: None,
             )
             row.pack(fill="x", pady=2)
             self._xfr_rows[tid] = {"row": row, "tot": tot, "start_time": time.time()}
@@ -977,26 +1028,33 @@ class ClientScreen(tk.Frame):
         conn_card = Card(self)
         conn_card.pack(fill="x", padx=16, pady=(0, 8), ipadx=8, ipady=8)
 
+        # Server IP row — prominent, full-width
+        ip_row = tk.Frame(conn_card, bg=SURFACE)
+        ip_row.pack(fill="x", padx=8, pady=(4, 2))
+
+        Label(ip_row, text="Server IP Address", bold=True).pack(side="left", padx=4)
+        self._host_var = tk.StringVar(value="")
+        self._host_entry = Entry(ip_row, textvariable=self._host_var, width=22)
+        self._host_entry.pack(side="left", padx=6)
+        Label(ip_row, text="e.g. 192.168.x.x  (use 127.0.0.1 for same machine)", muted=True).pack(side="left", padx=4)
+
+        # Port and download dir on a second row
         row = tk.Frame(conn_card, bg=SURFACE)
-        row.pack(fill="x", padx=8)
+        row.pack(fill="x", padx=8, pady=(2, 0))
 
-        Label(row, text="Host").grid(row=0, column=0, padx=4, sticky="w")
-        self._host_var = tk.StringVar(value="127.0.0.1")
-        Entry(row, textvariable=self._host_var, width=16).grid(row=0, column=1, padx=4)
-
-        Label(row, text="Port").grid(row=0, column=2, padx=8, sticky="w")
+        Label(row, text="Port").grid(row=0, column=0, padx=4, sticky="w")
         self._port_var = tk.StringVar(value="9000")
-        Entry(row, textvariable=self._port_var, width=7).grid(row=0, column=3, padx=4)
+        Entry(row, textvariable=self._port_var, width=7).grid(row=0, column=1, padx=4)
 
-        Label(row, text="DL Dir").grid(row=0, column=4, padx=8, sticky="w")
+        Label(row, text="Download Dir").grid(row=0, column=2, padx=12, sticky="w")
         self._dldir_var = tk.StringVar(value="./downloads")
-        Entry(row, textvariable=self._dldir_var, width=20).grid(row=0, column=5, padx=4)
+        Entry(row, textvariable=self._dldir_var, width=24).grid(row=0, column=3, padx=4)
         Btn(row, "…", style="ghost", width=3, command=self._browse_dldir).grid(
-            row=0, column=6, padx=2
+            row=0, column=4, padx=2
         )
 
         self._conn_btn = Btn(conn_card, "⚡  Connect", command=self._toggle_connect)
-        self._conn_btn.pack(pady=(6, 2))
+        self._conn_btn.pack(pady=(8, 2))
 
         nb_frame = tk.Frame(self, bg=BG)
         nb_frame.pack(fill="both", expand=True, padx=16, pady=(0, 8))
@@ -1155,13 +1213,18 @@ class ClientScreen(tk.Frame):
             self._do_connect()
 
     def _do_connect(self):
+        host = self._host_var.get().strip()
+        if not host:
+            messagebox.showerror("No IP address", "Enter the server's IP address.\n\nSame machine: 127.0.0.1\nHotspot/LAN: run  hostname -I  on the server to find its IP.")
+            self._host_entry.focus_set()
+            return
         try:
             port = int(self._port_var.get())
         except ValueError:
             messagebox.showerror("Bad port", "Port must be an integer")
             return
         self._client = FileTransferClient(
-            host=self._host_var.get(),
+            host=host,
             port=port,
             download_dir=self._dldir_var.get(),
             log_cb=lambda m, tag="info": self._q.put(("log_both", m, tag)),
@@ -1205,52 +1268,58 @@ class ClientScreen(tk.Frame):
         tid = new_tid()
         cancel_evt = threading.Event()
         pause_evt = threading.Event()
+        log_key = "log_dl" if direction == "dl" else "log_ul"
 
         rows_frame = self._dl_rows_frame if direction == "dl" else self._ul_rows_frame
         no_lbl = self._no_dl_lbl if direction == "dl" else self._no_ul_lbl
         no_lbl.pack_forget()
 
-        row = TransferRow(
-            rows_frame,
-            filename,
-            direction,
-            on_pause=lambda paused: pause_evt.set() if paused else pause_evt.clear(),
-            on_cancel=lambda: cancel_evt.set(),
-        )
-        row.pack(fill="x", pady=2)
-
+        # Register early so callbacks can reference it
         self._active_transfers[tid] = {
             "cancel": cancel_evt,
             "pause": pause_evt,
-            "row": row,
+            "row": None,
             "direction": direction,
             "filename": filename,
         }
 
-        def prog_cb(frac, speed):
-            self._q.put(("progress", tid, frac, speed))
+        def _start_thread():
+            cancel_evt.clear()
+            pause_evt.clear()
+            prog_cb = lambda frac, spd: self._q.put(("progress", tid, frac, spd))
+            log_cb = lambda msg, tag="info": self._q.put((log_key, msg, tag))
+            if direction == "dl":
+                t = threading.Thread(
+                    target=self._download_thread,
+                    args=(tid, filename, prog_cb, cancel_evt, pause_evt, log_cb),
+                    daemon=True,
+                )
+            else:
+                t = threading.Thread(
+                    target=self._upload_thread,
+                    args=(tid, filename, prog_cb, cancel_evt, pause_evt, log_cb),
+                    daemon=True,
+                )
+            self._active_transfers[tid]["thread"] = t
+            t.start()
 
-        def log_cb_dl(msg, tag="info"):
-            self._q.put(("log_dl", msg, tag))
+        def on_resume():
+            self._q.put(("xfr_resuming", tid))
+            _start_thread()
 
-        def log_cb_ul(msg, tag="info"):
-            self._q.put(("log_ul", msg, tag))
+        row = TransferRow(
+            rows_frame,
+            filename,
+            direction,
+            on_pause=lambda: pause_evt.set(),
+            on_resume=on_resume,
+            on_cancel=lambda: cancel_evt.set(),
+            on_dismiss=lambda: self._cleanup_row_immediate(tid),
+        )
+        row.pack(fill="x", pady=2)
+        self._active_transfers[tid]["row"] = row
 
-        if direction == "dl":
-            t = threading.Thread(
-                target=self._download_thread,
-                args=(tid, filename, prog_cb, cancel_evt, pause_evt, log_cb_dl),
-                daemon=True,
-            )
-        else:
-            t = threading.Thread(
-                target=self._upload_thread,
-                args=(tid, filename, prog_cb, cancel_evt, pause_evt, log_cb_ul),
-                daemon=True,
-            )
-
-        self._active_transfers[tid]["thread"] = t
-        t.start()
+        _start_thread()
 
     def _download_thread(self, tid, filename, prog_cb, cancel_evt, pause_evt, log_cb):
         try:
@@ -1352,13 +1421,31 @@ class ClientScreen(tk.Frame):
                         # Pop item to stop memory leak tracking, but do NOT execute _cleanup_row which destroys the UI component.
                         self._active_transfers.pop(tid, None)
 
-                elif tag in ("xfr_cancel", "xfr_paused"):
+                elif tag == "xfr_paused":
+                    tid2 = item[1]
+                    if tid2 in self._active_transfers:
+                        d = self._active_transfers[tid2]["direction"]
+                        self._active_transfers[tid2]["row"].mark_paused()
+                        (self._dl_log if d == "dl" else self._ul_log).append(
+                            "Transfer paused — click ▶ to resume", "warn"
+                        )
+                        # Do NOT cleanup row — keep it visible for resume
+
+                elif tag == "xfr_resuming":
+                    tid2 = item[1]
+                    if tid2 in self._active_transfers:
+                        d = self._active_transfers[tid2]["direction"]
+                        self._active_transfers[tid2]["row"].mark_active()
+                        (self._dl_log if d == "dl" else self._ul_log).append(
+                            "Resuming transfer...", "accent"
+                        )
+
+                elif tag == "xfr_cancel":
                     if item[1] in self._active_transfers:
                         d = self._active_transfers[item[1]]["direction"]
-                        txt = "Paused" if tag == "xfr_paused" else "Cancelled"
-                        self._active_transfers[item[1]]["row"].mark_error(txt)
+                        self._active_transfers[item[1]]["row"].mark_error("Cancelled")
                         (self._dl_log if d == "dl" else self._ul_log).append(
-                            txt, "warn"
+                            "Cancelled", "warn"
                         )
                         self._cleanup_row(item[1], delay=3000)
 
@@ -1375,6 +1462,23 @@ class ClientScreen(tk.Frame):
         except queue.Empty:
             pass
         self.after(100, self._poll)
+
+    def _cleanup_row_immediate(self, tid):
+        if tid not in self._active_transfers:
+            return
+        transfer = self._active_transfers.pop(tid, None)
+        if not transfer:
+            return
+        row = transfer["row"]
+        direction = transfer["direction"]
+        try:
+            row.destroy()
+        except Exception:
+            pass
+        rows_frame = self._dl_rows_frame if direction == "dl" else self._ul_rows_frame
+        no_lbl = self._no_dl_lbl if direction == "dl" else self._no_ul_lbl
+        if not rows_frame.winfo_children():
+            no_lbl.pack(anchor="w", padx=8, pady=4)
 
     def _cleanup_row(self, tid, delay=5000):
         if tid not in self._active_transfers:

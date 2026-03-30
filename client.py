@@ -11,11 +11,12 @@ from encryption import encrypt_data, decrypt_data
 SERVER_IP = "127.0.0.1"
 MAIN_PORT = 9000
 
-def download_file(filename):
+def download_file(filename, server_ip=None):
     """Download a file from the server with resume capability"""
+    target_ip = server_ip or SERVER_IP
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.settimeout(5)
-    
+
     os.makedirs("downloads", exist_ok=True)
     filepath = f"downloads/{filename}"
     
@@ -32,21 +33,21 @@ def download_file(filename):
     
     # Send request with resume sequence
     request = encrypt_data(f"REQUEST {filename} {resume_seq}".encode())
-    sock.sendto(request, (SERVER_IP, MAIN_PORT))
-    
+    sock.sendto(request, (target_ip, MAIN_PORT))
+
     try:
         data, server_addr = sock.recvfrom(65535)
         response = decrypt_data(data).decode()
-        
+
         if response.startswith("ERROR"):
             print(f"[ERROR] {response}")
             sock.close()
             return False
-            
+
         parts = response.split()
         filesize = int(parts[1])
         session_port = int(parts[2])
-        session_addr = (SERVER_IP, session_port)
+        session_addr = (target_ip, session_port)
         
         sock.sendto(encrypt_data(b"READY"), session_addr)
         
@@ -123,9 +124,9 @@ def download_file(filename):
         return False
 
 
-def upload_file(filepath):
+def upload_file(filepath, server_ip=None):
     """Upload a file to the server (Standard Stop-and-Wait)"""
-    # ... [Keep your existing upload_file function exactly as it was] ...
+    target_ip = server_ip or SERVER_IP
     if not os.path.exists(filepath):
         print(f"[ERROR] File not found: {filepath}")
         return False
@@ -135,16 +136,23 @@ def upload_file(filepath):
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.settimeout(5)
     
+    # Check for partially uploaded file progress before sending request
+    progress_file = f"{filepath}.upload_progress"
+    resume_seq = 0
+    if os.path.exists(progress_file):
+        with open(progress_file, "r") as pf:
+            resume_seq = int(pf.read().strip())
+
     print(f"\n[CLIENT] Uploading file: {filename} ({filesize} bytes)")
-    sock.sendto(encrypt_data(f"UPLOAD {filename} {filesize}".encode()), (SERVER_IP, MAIN_PORT))
-    
+    sock.sendto(encrypt_data(f"UPLOAD {filename} {filesize} {resume_seq}".encode()), (target_ip, MAIN_PORT))
+
     try:
         data, server_addr = sock.recvfrom(65535)
         response = decrypt_data(data).decode()
-        
+
         if response.startswith("ERROR"): return False
         session_port = int(response.split()[1])
-        session_addr = (SERVER_IP, session_port)
+        session_addr = (target_ip, session_port)
         
         sock.sendto(encrypt_data(b"READY"), session_addr)
         try:
@@ -152,35 +160,60 @@ def upload_file(filepath):
             if decrypt_data(go_data).decode() != "GO": return False
         except socket.timeout: return False
         
-        print(f"\n[UPLOAD] Starting...")
+        if resume_seq > 0:
+            print(f"[INFO] Partial upload detected. Resuming from chunk {resume_seq}...")
+        else:
+            print(f"\n[UPLOAD] Starting... (Press Ctrl+C to pause transfer)")
+
         with open(filepath, "rb") as f:
-            seq, sent_bytes, retries, max_retries = 0, 0, 0, 5
-            
-            while True:
-                chunk = f.read(CHUNK_SIZE)
-                if not chunk: break
-                
-                chunk_checksum = checksum(chunk)
-                packet = encrypt_data(f"{seq}|{chunk_checksum}|".encode() + chunk)
-                
-                while retries < max_retries:
-                    sock.sendto(packet, session_addr)
-                    try:
-                        ack_data, _ = sock.recvfrom(1024)
-                        ack = decrypt_data(ack_data).decode()
-                        if ack == f"ACK {seq}":
-                            sent_bytes += len(chunk)
-                            progress = (sent_bytes / filesize) * 100 if filesize > 0 else 100
-                            sys.stdout.write(f"\r[SENT] Chunk {seq} | Progress: {progress:.1f}% ✓")
-                            sys.stdout.flush()
-                            retries = 0
-                            break
-                        elif ack.startswith("NACK"): retries += 1
-                    except socket.timeout: retries += 1
-                
-                if retries >= max_retries: return False
-                seq += 1
-                
+            seq = resume_seq
+            sent_bytes = resume_seq * CHUNK_SIZE
+            retries = 0
+            max_retries = 5
+
+            if resume_seq > 0:
+                f.seek(resume_seq * CHUNK_SIZE)
+
+            try:
+                while True:
+                    chunk = f.read(CHUNK_SIZE)
+                    if not chunk: break
+
+                    chunk_checksum = checksum(chunk)
+                    packet = encrypt_data(f"{seq}|{chunk_checksum}|".encode() + chunk)
+
+                    while retries < max_retries:
+                        sock.sendto(packet, session_addr)
+                        try:
+                            ack_data, _ = sock.recvfrom(1024)
+                            ack = decrypt_data(ack_data).decode()
+                            if ack == f"ACK {seq}":
+                                sent_bytes += len(chunk)
+                                progress = (sent_bytes / filesize) * 100 if filesize > 0 else 100
+                                sys.stdout.write(f"\r[SENT] Chunk {seq} | Progress: {progress:.1f}% ✓")
+                                sys.stdout.flush()
+                                retries = 0
+                                break
+                            elif ack.startswith("NACK"): retries += 1
+                        except socket.timeout: retries += 1
+
+                    if retries >= max_retries: return False
+                    seq += 1
+
+                    # Save progress after each successful chunk
+                    with open(progress_file, "w") as pf:
+                        pf.write(str(seq))
+
+            except KeyboardInterrupt:
+                print(f"\n\n[PAUSED] Upload manually paused.")
+                print(f"[INFO] Saved {sent_bytes} bytes. Run upload again to resume from chunk {seq}.")
+                sock.close()
+                return False
+
+        # Clean up progress file on successful completion
+        if os.path.exists(progress_file):
+            os.remove(progress_file)
+
         sock.sendto(encrypt_data(b"DONE"), session_addr)
         try:
             confirm_data, _ = sock.recvfrom(1024)
@@ -200,26 +233,35 @@ def main():
     print("=" * 50)
     print("       Reliable FTP Client (UDP + Encrypted)")
     print("=" * 50)
-    
-    if len(sys.argv) > 1:
-        action = sys.argv[1].lower()
-        if action == "download" and len(sys.argv) > 2: download_file(sys.argv[2])
-        elif action == "upload" and len(sys.argv) > 2: upload_file(sys.argv[2])
+
+    # Usage: python client.py <server_ip> download <filename>
+    #        python client.py <server_ip> upload <filepath>
+    #        python client.py              (interactive, prompts for IP)
+    if len(sys.argv) > 2:
+        server_ip = sys.argv[1]
+        action = sys.argv[2].lower()
+        if action == "download" and len(sys.argv) > 3:
+            download_file(sys.argv[3], server_ip)
+        elif action == "upload" and len(sys.argv) > 3:
+            upload_file(sys.argv[3], server_ip)
     else:
+        server_ip = input("Enter server IP (press Enter for localhost): ").strip() or "127.0.0.1"
+        print(f"[INFO] Connecting to server at {server_ip}")
+
         while True:
             print("\n" + "-" * 40)
             print("  1. Download file (Supports Pause/Resume)")
             print("  2. Upload file")
             print("  3. Exit")
             print("-" * 40)
-            
+
             choice = input("Select option (1/2/3): ").strip()
             if choice == "1":
                 filename = input("Enter filename to download: ").strip()
-                if filename: download_file(filename)
+                if filename: download_file(filename, server_ip)
             elif choice == "2":
                 filepath = input("Enter path to file to upload: ").strip()
-                if filepath: upload_file(filepath)
+                if filepath: upload_file(filepath, server_ip)
             elif choice == "3":
                 print("\n[CLIENT] Goodbye!")
                 break
